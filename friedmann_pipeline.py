@@ -93,6 +93,12 @@ LOWER_BETTER_PATTERNS = [
 HEADER_COLOR = "305496"
 GREEN = "C6E0B4"
 
+# Violin-compare palette (ported from make_violin_compare.py)
+CHAMPION = "#1B7A34"
+OTHER = "#8FA3B8"
+JITTER = "#2E3A46"
+MEAN = "#D62728"
+
 # Per-path parsed-frame cache + dropped-row log (path, metric) -> (before, after).
 _DF_CACHE = {}
 _DROPPED = {}
@@ -347,8 +353,10 @@ def clear_view_outputs(view_slug: str, results: list) -> None:
     for s in slugs:
         patterns += [f"Ranks_{view_slug}_{s}.csv", f"TestStatistics_{view_slug}_{s}.csv",
                      f"SPSS_Friedman_{view_slug}_{s}.txt", f"posthoc_{view_slug}_{s}.csv",
-                     f"friedman_plots_{view_slug}_{s}.png",
-                     f"Descriptives_{view_slug}_{s}.csv"]
+                     f"Descriptives_{view_slug}_{s}.csv",
+                     f"violin_compare_{view_slug}_{s}.png"]
+    patterns += [f"violin_compare_composite_{view_slug}.png",
+                 f"violin_compare_metrics_{view_slug}.png"]
     for pat in patterns:
         for f in glob.glob(os.path.join(CFG.out_dir, pat)):
             safe_remove(f)
@@ -396,17 +404,137 @@ def save_per_metric(result: dict) -> None:
         f.write("Pairwise Wilcoxon (two-sided, zero_method='wilcox'): "
                 "Pos = # x>y (x is left condition).\n")
 
-    # Plots
-    fig, ax = plt.subplots(1, 2, figsize=(14, 4))
-    sns.boxplot(data=result["wide"][result["desc"].index], ax=ax[0])
-    ax[0].tick_params(axis="x", rotation=45)
-    ax[0].set_title(f"{view} {result['metric']}: scores by model")
-    result["desc"]["MeanRank"].sort_values().plot(kind="barh", ax=ax[1])
-    ax[1].set_title("Mean ranks")
-    ax[1].set_xlabel("Mean rank")
+
+def composite_score(results: list) -> pd.DataFrame:
+    """Per-run composite score across a view's metrics (ported from
+    `make_violin_compare.composite_wide`).
+
+    Each metric is rank-scaled 1..k per run so units are comparable;
+    lower-is-better metrics are flipped so higher = better.
+    """
+    scaled = []
+    for r in results:
+        wide = r["wide"]
+        k = wide.shape[1]
+        ranks = wide.rank(axis=1)
+        if is_lower_better(r["metric"]):
+            ranks = (k + 1) - ranks
+        scaled.append(ranks)
+    return sum(scaled) / len(scaled)
+
+
+def draw_violin(ax, wide: pd.DataFrame, champion: str, title: str,
+                ylabel: str, order=None, flip_mean=False) -> None:
+    """Model violins (inner box) + jitter + red mean marker, champion green."""
+    if order is None:
+        mean = wide.mean()
+        order = list(mean.sort_values(ascending=flip_mean).index)
+    palette = [CHAMPION if m == champion else OTHER for m in order]
+    order = list(order)
+
+    sns.violinplot(data=wide[order], order=order, inner="box",
+                   palette=palette, linewidth=1.0, saturation=1.0, ax=ax)
+    for violin, m in zip(ax.collections, order):
+        if m == champion:
+            violin.set_edgecolor(CHAMPION)
+            violin.set_linewidth(1.6)
+
+    rng = np.random.default_rng(seed=42)
+    for i, m in enumerate(order):
+        vals = wide[m].to_numpy()
+        jit = rng.uniform(-0.18, 0.18, size=len(vals))
+        ax.scatter(i + jit, vals, s=7, alpha=0.5, color=JITTER,
+                   linewidths=0, zorder=5)
+        ax.scatter(i, vals.mean(), s=55, color=MEAN, marker="o",
+                   edgecolor="#7A1B1B", linewidth=1.0, zorder=8)
+
+    ax.set_xticks(range(len(order)))
+    ax.set_xticklabels([str(c) for c in order], rotation=90, fontsize=7.5)
+    ax.set_title(title, fontsize=10)
+    ax.set_ylabel(ylabel, fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+
+
+def composite_violin_figure(view: str, comp: pd.DataFrame, champion: str) -> None:
+    fig, ax = plt.subplots(figsize=(16, 6.5))
+    draw_violin(
+        ax, comp, champion,
+        f"{view}: composite score per model — best ({champion}, green) vs rest "
+        "(mean Friedman rank-scale, higher = better)",
+        "Composite score",
+    )
+    out = os.path.join(CFG.out_dir, f"violin_compare_composite_{view}.png")
     plt.tight_layout()
-    plt.savefig(os.path.join(CFG.out_dir, f"friedman_plots_{view}_{s}.png"), dpi=150)
+    plt.savefig(out, dpi=150)
     plt.close(fig)
+    print(f"Saved -> {out} (champion {champion})")
+
+
+def metric_violin_figure(view: str, result: dict, champion: str) -> None:
+    wide = result["wide"]
+    mean = wide.mean()
+    order = list(mean.sort_values(
+        ascending=is_lower_better(result["metric"])).index)
+    fig, ax = plt.subplots(figsize=(16, 6.5))
+    draw_violin(
+        ax, wide, champion,
+        f"{view}: {result['metric']} — best model ({champion}, green) vs rest "
+        "(pink = mean, dots = runs, box = quartiles)",
+        f"Mean {result['metric']}",
+        order=order,
+    )
+    out = os.path.join(CFG.out_dir,
+                       f"violin_compare_{view}_{result['slug']}.png")
+    plt.tight_layout()
+    plt.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved -> {out}")
+
+
+def grid_violin_figure(view: str, results: list, champion: str) -> None:
+    n = len(results)
+    if n == 0:
+        return
+    cols = int(np.ceil(np.sqrt(n)))
+    rows = int(np.ceil(n / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(16, 6 * rows))
+    axes = np.atleast_1d(axes)
+    for ax, r in zip(axes.ravel(), results):
+        wide = r["wide"]
+        mean = wide.mean()
+        order = list(mean.sort_values(
+            ascending=is_lower_better(r["metric"])).index)
+        draw_violin(
+            ax, wide, champion,
+            f"{r['metric']} — model vs best ({champion}, green)",
+            f"Mean {r['metric']}",
+            order=order,
+        )
+    for ax in axes.ravel()[n:]:
+        ax.set_visible(False)
+    fig.suptitle(f"{view}: per-metric distributions (violin + box + jitter + mean) "
+                 f"— best model {champion} in green", fontsize=14)
+    out = os.path.join(CFG.out_dir, f"violin_compare_metrics_{view}.png")
+    plt.tight_layout(rect=(0, 0, 1, 0.985))
+    plt.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"Saved -> {out}")
+
+
+def save_violin_compare(view_slug: str, results: list) -> None:
+    """Violin-compare plots per view (port of `make_violin_compare.py`).
+
+    Composite + per-metric + grid figures for every view's analyzed metrics.
+    """
+    ordered = [r for r in results if r["view"] == view_slug]
+    if not ordered:
+        return
+    comp = composite_score(ordered)
+    champion = comp.mean(axis=0).idxmax()
+    composite_violin_figure(view_slug, comp, champion)
+    for r in ordered:
+        metric_violin_figure(view_slug, r, champion)
+    grid_violin_figure(view_slug, ordered, champion)
 
 
 def unique_sheet_name(slug: str, taken: set) -> str:
@@ -667,6 +795,7 @@ def run_analysis(paths: list, selected: set | None = None):
         clear_view_outputs(view_slug, results)
         for r in res:
             save_per_metric(r)
+        save_violin_compare(view_slug, res)
         build_workbooks(view_slug, res)
 
     write_overall_md(results)

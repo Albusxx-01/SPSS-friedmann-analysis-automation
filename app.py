@@ -180,7 +180,7 @@ HOWTO_HTML = (
     "(`Ranks_*_All_Metrics.xlsx`, `TestStatistics_*_All_Metrics.xlsx`) "
     "as per-file buttons or one zip.\n"
     "• **Case 2 — All output (everything)**: one zip with `outputs/` "
-    "(CSVs, SPSS-style `.txt`, plots, summary, markdown) **and** "
+    "(CSVs, SPSS-style `.txt`, summary, markdown) **and** "
     "`final_results/` (the workbooks).\n\n"
     "</div>"
 )
@@ -367,7 +367,7 @@ if meta:
 
     section("5", "Download")
     st.caption("Case 1 = final 'All Metrics' workbooks only. "
-               "Case 2 = every output file (CSVs, SPSS-style txt, plots, "
+               "Case 2 = every output file (CSVs, SPSS-style txt, "
                "summary, workbooks) in one zip.")
     out_mode = st.radio("Output scope",
                         ["Case 1: All Metrics files only",
